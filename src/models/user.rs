@@ -1,7 +1,7 @@
 use chrono::{DateTime, FixedOffset, Utc};
-use mongodb::bson::{doc, Bson, Document};
-
+use mongodb::bson::{Bson, Document, doc};
 use serde::{Deserialize, Serialize};
+
 #[derive(Deserialize, Serialize)]
 pub struct User {
     pub phone_number_hash: String,
@@ -9,6 +9,13 @@ pub struct User {
     pub longitude: f64,
     pub available_until: DateTime<FixedOffset>,
     pub contacts_phone_number_hash: Vec<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct LocalizedUser {
+    pub phone_number_hash: String,
+    pub latitude: f64,
+    pub longitude: f64,
 }
 
 impl User {
@@ -32,6 +39,17 @@ impl User {
     }
 }
 
+/*impl LocalizedUser {
+    pub fn from_bson_document(document: &Document) -> Result<LocalizedUser, &str> {
+        //let phone = document.get_str("phone_number_hash")?;
+        let user : LocalizedUser = bson::from_document(document)?;
+        return Ok(LocalizedUser {
+            phone_number_hash: std::string::String::from(),
+            latitude: 0_f64,
+            longitude: 0_f64,
+        });
+    }
+}*/
 #[cfg(test)]
 mod tests {
     use super::*;
