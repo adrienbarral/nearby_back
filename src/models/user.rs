@@ -1,5 +1,5 @@
 use chrono::{DateTime, FixedOffset, Utc};
-use mongodb::bson::{Bson, Document, doc};
+use mongodb::bson::{bson, doc, Bson, Document};
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize, Serialize)]
@@ -14,8 +14,7 @@ pub struct User {
 #[derive(Deserialize, Serialize)]
 pub struct LocalizedUser {
     pub phone_number_hash: String,
-    pub latitude: f64,
-    pub longitude: f64,
+    pub distance: f32,
 }
 
 impl User {
@@ -30,8 +29,10 @@ impl User {
 
         let res = doc! {
             "phone_number_hash": self.phone_number_hash.clone(),
-            "latitude": self.latitude,
-            "longitude": self.longitude,
+            "location": doc! {
+                "type": "Point",
+                "coordinates": bson!([self.longitude, self.latitude])
+            },
             "available_until": utc_available_datetime,
             "contacts_phone_number_hash": contacts_phone
         };
@@ -39,17 +40,6 @@ impl User {
     }
 }
 
-/*impl LocalizedUser {
-    pub fn from_bson_document(document: &Document) -> Result<LocalizedUser, &str> {
-        //let phone = document.get_str("phone_number_hash")?;
-        let user : LocalizedUser = bson::from_document(document)?;
-        return Ok(LocalizedUser {
-            phone_number_hash: std::string::String::from(),
-            latitude: 0_f64,
-            longitude: 0_f64,
-        });
-    }
-}*/
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -72,14 +62,28 @@ mod tests {
             user.phone_number_hash
         );
 
+        let location = bson_user
+            .get_document("location")
+            .expect("can't find latitude in BSON Document");
         assert_eq!(
-            (bson_user
-                .get_f64("latitude")
-                .expect("can't find latitude in BSON Document")
-                - user.latitude)
-                .abs()
-                < 0.0001,
-            true
+            location.get_str("type").expect("Can't find geoJSON Type"),
+            "Point"
         );
+        let coordinates = location
+            .get_array("coordinates")
+            .expect("Can't find coordinates");
+        let longitude = coordinates
+            .get(0)
+            .expect("Coordinates array doesn't have the good size")
+            .as_f64()
+            .expect("Longitude is not f64 !!");
+
+        let latitude = coordinates
+            .get(1)
+            .expect("Coordinates array doesn't have the good size")
+            .as_f64()
+            .expect("Longitude is not f64 !!");
+        assert!((longitude - user.longitude).abs() < 0.0001);
+        assert!((latitude - user.latitude).abs() < 0.0001);
     }
 }

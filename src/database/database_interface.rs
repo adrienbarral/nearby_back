@@ -2,9 +2,10 @@ use crate::models::user;
 use futures::StreamExt;
 use mongodb::{
     bson,
+    bson::bson,
     bson::doc,
     error::Error,
-    options::{FindOneAndReplaceOptions, FindOptions, InsertOneOptions},
+    options::{AggregateOptions, FindOneAndReplaceOptions, InsertOneOptions},
     Client, Collection,
 };
 
@@ -54,14 +55,22 @@ impl DataBaseInterface {
         return Ok(ReplacedOrInserted::Inserted);
     }
 
-    pub async fn get_contacts_available(
+    /**
+     * Here latitude and longitde are in decimal degrees on a WGS84 ellipsoid
+     * (because Mongo do the job !).
+     */
+    pub async fn get_contacts_available_nearby(
         self: &DataBaseInterface,
         my_phone_hash: &String,
+        my_latitude: f64,
+        my_longitude: f64,
+        max_distance_m: f32,
     ) -> Result<Vec<user::LocalizedUser>, Error> {
-        let filter = doc! {"contacts_phone_number_hash": my_phone_hash.clone()};
-        let projection = doc! {"phone_number_hash": 1, "latitude": 1, "longitude": 1};
-        let find_options = FindOptions::builder().projection(projection).build();
-        let mut cursor = self.available_collection.find(filter, find_options).await?;
+        let pipeline = vec![
+            create_nearby_stage(my_phone_hash, my_latitude, my_longitude, max_distance_m),
+            create_projection_stage()
+        ];
+        let mut cursor = self.available_collection.aggregate(pipeline, None).await?;
         let mut res: Vec<user::LocalizedUser> = Vec::new();
         while let Some(doc) = cursor.next().await {
             match doc {
@@ -75,6 +84,30 @@ impl DataBaseInterface {
 
         return Ok(res);
     }
+}
+
+fn create_nearby_stage(
+    phone_hash: &String,
+    latitude: f64,
+    longitude: f64,
+    max_distance_m: f32,
+) -> bson::Document {
+    return doc! {
+        "$geoNear": doc! {
+            "near": doc! {
+                "type": "Point",
+                "coordinates": bson!([longitude, latitude]),
+            },
+            "distanceField": "distance",
+            "distanceMax": max_distance_m,
+            "query": doc! {"contacts_phone_number_hash": phone_hash.clone()},
+            "spherical": true
+        }
+    };
+}
+
+fn create_projection_stage() -> bson::Document {
+    return doc! {"$project": doc! {"phone_number_hash": 1, "distance": 1}};
 }
 
 #[cfg(test)]
@@ -121,39 +154,67 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_we_can_get_available_contacts() {
+    async fn test_we_can_get_available_contacts_nearby() {
         let database = prepare_test().await;
-        let user1 = user::User {
-            phone_number_hash: String::from("15645612"),
-            latitude: 43.2255228,
-            longitude: 6.3516515645,
+        let sylvester = user::User {
+            phone_number_hash: String::from("Sylverster Staline"),
+            latitude: 43.00001,
+            longitude: 6.00001,
             available_until: DateTime::parse_from_rfc3339("2021-05-21T18:21:43+00:00")
                 .expect("Can't parse date"),
-            contacts_phone_number_hash: vec!["123456".to_string(), "456789".to_string()],
+            contacts_phone_number_hash: vec![
+                "John Lenine".to_string(),
+                "Didier CrouteChef".to_string(),
+            ],
         };
         database
-            .set_user_available(&user1)
+            .set_user_available(&sylvester)
             .await
             .expect("Can't add user");
 
-        let user2 = user::User {
-            phone_number_hash: String::from("789456"),
-            latitude: 43.2255228,
-            longitude: 6.3516515645,
+        let didier = user::User {
+            phone_number_hash: String::from("Didier CrouteChef"),
+            latitude: 42.0000,
+            longitude: 5.0000,
             available_until: DateTime::parse_from_rfc3339("2021-05-21T18:21:43+00:00")
                 .expect("Can't parse date"),
-            contacts_phone_number_hash: vec!["456789".to_string()],
+            contacts_phone_number_hash: vec!["John Lenine".to_string()],
         };
         database
-            .set_user_available(&user2)
+            .set_user_available(&didier)
             .await
             .expect("Can't add user");
 
-        let my_phone_hash = "123456".to_string();
+        let unknown_man = user::User {
+            phone_number_hash: String::from("Unknown Man"),
+            latitude: 43.0000,
+            longitude: 6.0000,
+            available_until: DateTime::parse_from_rfc3339("2021-05-21T18:21:43+00:00")
+                .expect("Can't parse date"),
+            contacts_phone_number_hash: vec!["Unknwon Man's Friend".to_string()],
+        };
+        database
+            .set_user_available(&unknown_man)
+            .await
+            .expect("Can't add user");
+
+        let my_phone_hash = "John Lenine".to_string();
         let contact_availables = database
-            .get_contacts_available(&my_phone_hash)
+            .get_contacts_available_nearby(&my_phone_hash, 43.000_f64, 6.000_f64, 1000_f32)
             .await
             .expect("Can't get availables contacts");
+
+        /*
+         * Here, both Unknwo Men and Dider CrouteChef are close to John.
+         * The aggregation must return only Didier, because sylvester is far from Joh !
+         */
         assert_eq!(contact_availables.len(), 1);
+        assert_eq!(
+            contact_availables
+                .get(0)
+                .expect("Not enough returned values")
+                .phone_number_hash,
+            didier.phone_number_hash
+        )
     }
 }
