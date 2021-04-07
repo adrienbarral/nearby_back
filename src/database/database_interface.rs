@@ -1,13 +1,7 @@
 use crate::models::user;
+use chrono::{DateTime, FixedOffset, Utc};
 use futures::StreamExt;
-use mongodb::{
-    bson,
-    bson::bson,
-    bson::doc,
-    error::Error,
-    options::{AggregateOptions, FindOneAndReplaceOptions, InsertOneOptions},
-    Client, Collection,
-};
+use mongodb::{bson, bson::bson, bson::doc, error::Error, Client, Collection};
 
 // TODO : Use that : https://developer.mongodb.com/article/serde-improvements/
 
@@ -35,10 +29,9 @@ impl DataBaseInterface {
     ) -> Result<ReplacedOrInserted, mongodb::error::Error> {
         // We start by looking for this user in the available users :
         let filter = doc! {"phone_number_hash": user.phone_number_hash.clone()};
-        let find_options = FindOneAndReplaceOptions::builder().build();
         let replaced = self
             .available_collection
-            .find_one_and_replace(filter, user.to_bson_document(), find_options)
+            .find_one_and_replace(filter, user.to_bson_document(), None)
             .await?;
 
         if let Some(_) = replaced {
@@ -49,7 +42,7 @@ impl DataBaseInterface {
         // Else, we must insert a new user available into the collection :
         let _ = self
             .available_collection
-            .insert_one(user.to_bson_document(), InsertOneOptions::builder().build())
+            .insert_one(user.to_bson_document(), None)
             .await?;
 
         return Ok(ReplacedOrInserted::Inserted);
@@ -68,7 +61,7 @@ impl DataBaseInterface {
     ) -> Result<Vec<user::LocalizedUser>, Error> {
         let pipeline = vec![
             create_nearby_stage(my_phone_hash, my_latitude, my_longitude, max_distance_m),
-            create_projection_stage()
+            create_projection_stage(),
         ];
         let mut cursor = self.available_collection.aggregate(pipeline, None).await?;
         let mut res: Vec<user::LocalizedUser> = Vec::new();
@@ -83,6 +76,21 @@ impl DataBaseInterface {
         }
 
         return Ok(res);
+    }
+
+    /**
+     * Remove all user in database that are no longuer available.
+     * Return the number of user deleted from the base.
+     */
+    pub async fn remove_available_until(
+        self: &DataBaseInterface,
+        date_time: DateTime<FixedOffset>,
+    ) -> Result<i64, Error> {
+        let date_time_utc: DateTime<Utc> = DateTime::from(date_time);
+        let query = doc! {"available_until": doc! {"$lt": date_time_utc}};
+        let delete_res = self.available_collection.delete_many(query, None).await?;
+
+        return Ok(delete_res.deleted_count);
     }
 }
 
@@ -99,7 +107,7 @@ fn create_nearby_stage(
                 "coordinates": bson!([longitude, latitude]),
             },
             "distanceField": "distance",
-            "distanceMax": max_distance_m,
+            "maxDistance": max_distance_m,
             "query": doc! {"contacts_phone_number_hash": phone_hash.clone()},
             "spherical": true
         }
@@ -120,7 +128,7 @@ mod tests {
         let database = DataBaseInterface::new().await.expect("Can't connect to DB");
         let delete_res = database
             .available_collection
-            .delete_many(doc! {}, mongodb::options::DeleteOptions::builder().build())
+            .delete_many(doc! {}, None)
             .await
             .expect("Can't clean DB");
         println!("{} document deleted", delete_res.deleted_count);
@@ -214,7 +222,66 @@ mod tests {
                 .get(0)
                 .expect("Not enough returned values")
                 .phone_number_hash,
-            didier.phone_number_hash
+            sylvester.phone_number_hash
         )
+    }
+
+    #[tokio::test]
+    async fn test_we_remove_user_no_longuer_available() {
+        let database = prepare_test().await;
+
+        let available = user::User {
+            phone_number_hash: String::from("Available"),
+            latitude: 43.2255228,
+            longitude: 6.3516515645,
+            available_until: DateTime::parse_from_rfc3339("2021-05-21T18:21:00+00:00")
+                .expect("Can't parse date"),
+            contacts_phone_number_hash: vec![],
+        };
+
+        let not_available = user::User {
+            phone_number_hash: String::from("Not Available"),
+            latitude: 43.2255228,
+            longitude: 6.3516515645,
+            available_until: DateTime::parse_from_rfc3339("2021-05-21T18:20:00+00:00")
+                .expect("Can't parse date"),
+            contacts_phone_number_hash: vec![],
+        };
+
+        let _ = database
+            .set_user_available(&available)
+            .await
+            .expect("Can't add user");
+
+        let _ = database
+            .set_user_available(&not_available)
+            .await
+            .expect("Can't add user");
+
+        let now =
+            DateTime::parse_from_rfc3339("2021-05-21T18:20:30+00:00").expect("Can't parse date !");
+
+        let count = database
+            .remove_available_until(now)
+            .await
+            .expect("Can't remove users");
+        assert_eq!(count, 1);
+
+        let mut cursor = database
+            .available_collection
+            .find(doc! {}, None)
+            .await
+            .expect("Can't get users");
+        // We check that the remaining user is the good one :
+        let mut availables_users_hash: Vec<String> = Vec::new();
+        while let Some(doc) = cursor.next().await {
+            let user = doc.expect("Error when retrieving users");
+            availables_users_hash.push(String::from(
+                user.get_str("phone_number_hash")
+                    .expect("Can't find key phone number hash"),
+            ));
+        }
+        assert_eq!(availables_users_hash.len(), 1);
+        assert_eq!(*availables_users_hash.get(0).expect("Incorrect length"), available.phone_number_hash);
     }
 }
