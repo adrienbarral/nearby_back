@@ -1,21 +1,42 @@
 use crate::models::user;
 use chrono::{DateTime, FixedOffset, Utc};
 use futures::StreamExt;
-use mongodb::{bson, bson::bson, bson::doc, error::Error, Client, Collection};
+use mongodb::{bson, bson::bson, bson::doc, Client, Collection};
 
+#[derive(Debug)]
+pub struct DatabaseError {
+    pub message: String,
+}
+
+impl From<mongodb::error::Error> for DatabaseError {
+    fn from(db_error: mongodb::error::Error) -> Self {
+        return DatabaseError {
+            message: std::format!("Database Error : {}", db_error),
+        };
+    }
+}
+
+impl From<bson::de::Error> for DatabaseError {
+    fn from(bson_error: bson::de::Error) -> Self {
+        return DatabaseError {
+            message: std::format!("BSON Error : {}", bson_error),
+        };
+    }
+}
 // TODO : Use that : https://developer.mongodb.com/article/serde-improvements/
-
+#[derive(Clone)]
 pub struct DataBaseInterface {
     client: Client,
     available_collection: Collection,
 }
+
 pub enum ReplacedOrInserted {
     Replaced,
     Inserted,
 }
 
 impl DataBaseInterface {
-    pub async fn new() -> Result<DataBaseInterface, Error> {
+    pub async fn new() -> Result<DataBaseInterface, DatabaseError> {
         let client = Client::with_uri_str("mongodb://localhost:27017/").await?;
         let collection = client.database("nearby").collection("available");
         return Ok(DataBaseInterface {
@@ -26,7 +47,7 @@ impl DataBaseInterface {
     pub async fn set_user_available(
         self: &DataBaseInterface,
         user: &user::User,
-    ) -> Result<ReplacedOrInserted, mongodb::error::Error> {
+    ) -> Result<ReplacedOrInserted, DatabaseError> {
         // We start by looking for this user in the available users :
         let filter = doc! {"phone_number_hash": user.phone_number_hash.clone()};
         let replaced = self
@@ -58,7 +79,7 @@ impl DataBaseInterface {
         my_latitude: f64,
         my_longitude: f64,
         max_distance_m: f32,
-    ) -> Result<Vec<user::LocalizedUser>, Error> {
+    ) -> Result<Vec<user::LocalizedUser>, DatabaseError> {
         let pipeline = vec![
             create_nearby_stage(my_phone_hash, my_latitude, my_longitude, max_distance_m),
             create_projection_stage(),
@@ -85,7 +106,7 @@ impl DataBaseInterface {
     pub async fn remove_available_until(
         self: &DataBaseInterface,
         date_time: DateTime<FixedOffset>,
-    ) -> Result<i64, Error> {
+    ) -> Result<i64, DatabaseError> {
         let date_time_utc: DateTime<Utc> = DateTime::from(date_time);
         let query = doc! {"available_until": doc! {"$lt": date_time_utc}};
         let delete_res = self.available_collection.delete_many(query, None).await?;
@@ -282,6 +303,9 @@ mod tests {
             ));
         }
         assert_eq!(availables_users_hash.len(), 1);
-        assert_eq!(*availables_users_hash.get(0).expect("Incorrect length"), available.phone_number_hash);
+        assert_eq!(
+            *availables_users_hash.get(0).expect("Incorrect length"),
+            available.phone_number_hash
+        );
     }
 }
