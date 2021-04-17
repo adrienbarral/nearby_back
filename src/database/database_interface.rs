@@ -1,4 +1,5 @@
 use crate::models::user;
+use actix_web::web::Data;
 use chrono::{DateTime, FixedOffset, Utc};
 use futures::StreamExt;
 use mongodb::{bson, bson::bson, bson::doc, Client, Collection};
@@ -113,6 +114,19 @@ impl DataBaseInterface {
 
         return Ok(delete_res.deleted_count);
     }
+
+    /**
+     * Usefull for testing, will return the number of deleted items.
+     */
+    #[cfg(test)]
+    pub async fn clear_database(self: &DataBaseInterface) -> Result<i64, DatabaseError> {
+        let res = self
+            .available_collection
+            .delete_many(doc! {}, None)
+            .await
+            .map(|res| res.deleted_count)?;
+        return Ok(res);
+    }
 }
 
 fn create_nearby_stage(
@@ -147,12 +161,8 @@ mod tests {
 
     async fn prepare_test() -> DataBaseInterface {
         let database = DataBaseInterface::new().await.expect("Can't connect to DB");
-        let delete_res = database
-            .available_collection
-            .delete_many(doc! {}, None)
-            .await
-            .expect("Can't clean DB");
-        println!("{} document deleted", delete_res.deleted_count);
+        let deleted = database.clear_database().await.expect("Can't clean DB");
+        println!("{} document deleted", deleted);
         return database;
     }
     #[tokio::test]
